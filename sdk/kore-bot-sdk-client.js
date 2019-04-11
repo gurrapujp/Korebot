@@ -1,17 +1,25 @@
-require=(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({"/KoreBot.js":[function(require,module,exports){
+requireKr=(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({"/KoreBot.js":[function(require,module,exports){
 var clients = require('./index.js');
 var EventEmitter = require('events');
 var inherits = require('inherits');
-var bind = require('lodash').bind;
-var isFunction = require('lodash').isFunction;
+var lodash;
+if (require('lodash').bind) {
+	lodash = require('lodash');
+} else {
+	lodash = _;
+}
+var bind = lodash.bind;
+var isFunction = lodash.isFunction;
 var RTM_CLIENT_EVENTS = clients.CLIENT_EVENTS.RTM;
 var RTM_EVENTS = clients.RTM_EVENTS;
 var jstz = require('./jstz.js');
+var noop = lodash.noop;
 
 if(typeof window !== "undefined"){
 	window.kore = window.kore || {};
 	window.kore.botsdk = window.kore.botsdk || {};
 	window.kore.botsdk.logger = window.kore.botsdk.logger || require("debug");
+	window.messageHistoryLimit = 10;
 }
 
 var debug = require("debug")("botsdk:KoreBot");
@@ -27,12 +35,80 @@ function KoreBot() {
 	this.latestId = null; // latest messageId.
 	this.oldestId = null; // oldest messageId.
 }
+var userLocation = {
+    "city": "",
+    "country": "",
+    "latitude": 0,
+    "longitude": 0,
+    "street": ""
+};
+var _chatHistoryLoaded = false;
 inherits(KoreBot, EventEmitter);
 
 KoreBot.prototype.emit = function emit() {
+	if(!_chatHistoryLoaded && arguments && arguments[0] === 'history') {
+		_chatHistoryLoaded = true;
+		this.cbBotChatHistory(arguments);
+	}
+	else if(_chatHistoryLoaded && arguments && arguments[0] === 'history') {
+		setTimeout(function(){
+            $('.chatInputBox').focus();
+            $('.disableFooter').removeClass('disableFooter');
+        });
+	}
   KoreBot.super_.prototype.emit.apply(this, arguments);
 };
 
+/*
+	Fetch user location and send along with user message
+*/
+KoreBot.prototype.fetchUserLocation = function() {
+	if(userLocation.country !== "") {
+		return;
+	}
+	console.log("Fetching user location");
+	var successCallback =  function(position){
+		var latitude = position.coords.latitude;
+		var longitude =  position.coords.longitude;
+		userLocation.latitude = latitude;
+		userLocation.longitude = longitude;
+		var request = new XMLHttpRequest();
+
+	   var method = 'GET';
+	   var url = 'http://maps.googleapis.com/maps/api/geocode/json?latlng='+latitude+','+longitude+'&sensor=true';
+	   var async = true;
+
+	   request.open(method, url, async);
+	   request.onreadystatechange = function(){
+		    if(request.readyState == 4 && request.status == 200){
+				var data = JSON.parse(request.responseText);
+				if(typeof(Storage) !== "undefined") {
+					if(data.results.length == 0) {
+						data = JSON.parse(localStorage.getItem("locationData"));
+					}
+					else{
+						localStorage.setItem("locationData", JSON.stringify(data));
+					}
+				}
+				var addressComponents = data.results[0].address_components;
+				for(i=0;i<addressComponents.length;i++){
+					var types = addressComponents[i].types;
+					if(types=="locality,political"){
+						userLocation.city = addressComponents[i].long_name;
+					}
+					else if(types=="country,political"){
+						userLocation.country = addressComponents[i].long_name;
+					}
+					else if(types=="street_number"){
+						userLocation.street = addressComponents[i].long_name;
+					}
+				}
+		   }
+		};
+		request.send();
+	};
+	navigator.geolocation.getCurrentPosition(successCallback);
+};
 /*
 sends a message to bot.
 */
@@ -46,10 +122,13 @@ KoreBot.prototype.sendMessage = function(message,optCb) {
 			"timezone":jstz.jstz.determine().name(),
 			"locale":window.navigator.userLanguage || window.navigator.language
 		};
+		if(userLocation.latitude !== 0 && userLocation.longitude !== 0) { //passing location for each message
+			message["meta"].location = userLocation;
+		}
 		this.RtmClient.sendMessage(message,optCb);
 	}else{
 		if(optCb){
-			optCb(true,"Bot is Initializing...Please try again");
+			optCb(new Error("Bot is Initializing...Please try again"));
 		}
 	}
 	
@@ -186,6 +265,10 @@ gets the history of the conversation.
 KoreBot.prototype.getHistory = function(opts) {
 	debug("get history");
 	opts = opts || {};
+	opts.limit = 10;
+    if(typeof window !== "undefined"){
+        opts.limit = window.messageHistoryLimit || 10;
+    }
 	var __opts__ = {};
 	__opts__.forward = opts.forward;
 	__opts__.limit = opts.limit || 10; // 10 is the max size.
@@ -218,8 +301,10 @@ emits the open event on WS connection established.
 */
 KoreBot.prototype.onOpenWSConnection = function(msg) {
 	debug("opened WS Connection");
-	this.initialized = true;
-	this.getHistory({});
+  this.initialized = true;
+  if(this.options.loadHistory && !_chatHistoryLoaded){
+    this.getHistory({});
+  }
 	this.emit(RTM_CLIENT_EVENTS.RTM_CONNECTION_OPENED, {});
 };
 
@@ -229,11 +314,20 @@ initializes the rtmclient and binds the cb's for ws events.
 KoreBot.prototype.onLogIn = function(err, data) {
 	debug("sign-in/anonymous user onLogin");
 	if (err) {
-        console.error(err && err.stack);
+        if (this.cbErrorToClient) {
+			if (data && data.errors && data.errors[0] && data.errors[0].msg) {
+				this.cbErrorToClient(data.errors[0].msg);
+			} else {
+				this.cbErrorToClient(err.message);
+			}
+		}
+		console.error(err && err.stack);
 	} else {
 		this.accessToken = data.authorization.accessToken;
 		this.options.accessToken = this.accessToken;
 		this.WebClient.user.accessToken = this.accessToken;
+		this.userInfo = data;
+		this.cbBotDetails(data,this.options.botInfo);
 		this.RtmClient = new clients.KoreRtmClient({}, this.options);
 		this.RtmClient.start({
 			"botInfo": this.options.botInfo
@@ -256,6 +350,9 @@ KoreBot.prototype.logIn = function(err, data) {
 		this.claims = data.assertion;
 		this.WebClient = new clients.KoreWebClient({}, this.options);
 		this.WebClient.claims = this.claims;
+		this.cbErrorToClient = data.handleError || noop;
+		this.cbBotDetails = data.botDetails || noop;
+		this.cbBotChatHistory = data.chatHistory || noop;
 		this.WebClient.login.login({"assertion":data.assertion,"botInfo":this.options.botInfo}, bind(this.onLogIn, this));
 	}
 
@@ -264,7 +361,14 @@ KoreBot.prototype.logIn = function(err, data) {
 /*
 initializes the bot set up.
 */
-KoreBot.prototype.init = function(options) {
+KoreBot.prototype.init = function(options,messageHistoryLimit) {
+	messageHistoryLimit = messageHistoryLimit || 10;
+	if(messageHistoryLimit > 100) {
+		messageHistoryLimit = 100;
+	}
+	if(typeof window !== "undefined"){
+        window.messageHistoryLimit = messageHistoryLimit || 10;
+    }
 	options = options || {};
 	this.options = options;
 	if (!options.test) {
@@ -288,6 +392,7 @@ KoreBot.prototype.init = function(options) {
 };
 
 module.exports.instance = function(){
+	_chatHistoryLoaded = false;
 	return new KoreBot();
 };
 },{"./index.js":1,"./jstz.js":2,"debug":21,"events":30,"inherits":23,"lodash":24}],1:[function(require,module,exports){
@@ -298,10 +403,10 @@ module.exports= {
   KoreRtmClient: require('./lib/clients/rtm/client'),
   CLIENT_EVENTS: {
     WEB: events.CLIENT_EVENTS.WEB,
-    RTM: events.CLIENT_EVENTS.RTM,
+    RTM: events.CLIENT_EVENTS.RTM
   },
   RTM_EVENTS: events.RTM_EVENTS,
-  RTM_MESSAGE_SUBTYPES: events.RTM_MESSAGE_SUBTYPES,
+  RTM_MESSAGE_SUBTYPES: events.RTM_MESSAGE_SUBTYPES
 };
 
 },{"./lib/clients/events":5,"./lib/clients/rtm/client":9,"./lib/clients/web/client":18}],2:[function(require,module,exports){
@@ -656,7 +761,13 @@ module.exports= {
 },{}],3:[function(require,module,exports){
 var EventEmitter = require('events');
 var async = require('async');
-var bind = require('lodash').bind;
+var lodash;
+if (require('lodash').bind) {
+	lodash = require('lodash');
+} else {
+	lodash = _;
+}
+var bind = lodash.bind;
 var inherits = require('inherits');
 var retry = require('retry');
 var urlJoin = require('url-join');
@@ -727,8 +838,9 @@ BaseAPIClient.prototype._callTransport = function _callTransport(task, queueCb) 
 
         httpErr = new Error('Unable to process request, received bad ' + statusCode + ' error');
         if (!retryOp.retry(httpErr)) {
-          cb(httpErr, null);
+          cb(httpErr, body);
         } else {
+		  cb(httpErr, body);
           return;
         }
       }
@@ -752,7 +864,7 @@ BaseAPIClient.prototype.makeAPICall = function makeAPICall(endpoint, optData, op
     headers: {
       'User-Agent': this.userAgent,
       "content-type":'application/json'
-    },
+    }
   };
 
   if(optData && optData.opts && optData.opts.authorization){
@@ -762,7 +874,7 @@ BaseAPIClient.prototype.makeAPICall = function makeAPICall(endpoint, optData, op
 
   this._requestQueue.push({
     args: args,
-    cb: apiCallArgs.cb,
+    cb: apiCallArgs.cb
   });
 };
 
@@ -775,7 +887,7 @@ module.exports = BaseAPIClient;
  */
 
 module.exports.WEB = {
-  RATE_LIMITED: 'rate_limited',
+  RATE_LIMITED: 'rate_limited'
 };
 
 module.exports.RTM = {
@@ -809,7 +921,7 @@ module.exports.RTM = {
 
   ATTEMPTING_RECONNECT: 'attempting_reconnect', // the client is attempting to initiate a reconnect
 
-  RAW_MESSAGE: 'raw_message',                   // a message was received from the RTM API. This
+  RAW_MESSAGE: 'raw_message'                   // a message was received from the RTM API. This
                                                 // will also contain the raw message payload that
                                                 // was sent from kore
 };
@@ -818,10 +930,10 @@ module.exports.RTM = {
 module.exports = {
   CLIENT_EVENTS: {
     WEB: require('./client').WEB,
-    RTM: require('./client').RTM,
+    RTM: require('./client').RTM
   },
   RTM_EVENTS: require('./rtm').EVENTS,
-  RTM_MESSAGE_SUBTYPES: require('./rtm').MESSAGE_SUBTYPES,
+  RTM_MESSAGE_SUBTYPES: require('./rtm').MESSAGE_SUBTYPES
 };
 
 },{"./client":4,"./rtm":6}],6:[function(require,module,exports){
@@ -831,12 +943,12 @@ module.exports = {
 
 module.exports.EVENTS = {
   HELLO: 'hello',
-  MESSAGE: 'message',
+  MESSAGE: 'message'
 };
 
 module.exports.MESSAGE_SUBTYPES = {
   BOT_MESSAGE: 'bot_message',
-  ME_MESSAGE: 'me_message',
+  ME_MESSAGE: 'me_message'
 };
 
 },{}],7:[function(require,module,exports){
@@ -862,13 +974,18 @@ module.exports.makeMessageEventWithSubtype = makeMessageEventWithSubtype;
 /**
  * Helpers for working with kore API clients.
  */
+var lodash;
+if (require('lodash').bind) {
+	lodash = require('lodash');
+} else {
+	lodash = _;
+}
+var assign = lodash.assign;
+var isFunction = lodash.isFunction;
+var isUndefined = lodash.isUndefined;
+var isString = lodash.isString;
+var forEach = lodash.forEach;
 
-var assign = require('lodash').assign;
-var isFunction = require('lodash').isFunction;
-var isUndefined = require('lodash').isUndefined;
-var isString = require('lodash').isString;
-var forEach = require('lodash').forEach;
-var noop = require('lodash').noop;
 
 var getData = function getData(data, token) {
   var newData = assign({}, data ? data.opts || {} : {});
@@ -919,7 +1036,7 @@ var getAPICallArgs = function getAPICallArgs(token, optData, optCb) {
 
   return {
     cb: cb,
-    data: data,
+    data: data
   };
 };
 
@@ -928,22 +1045,28 @@ module.exports.getData = getData;
 module.exports.getAPICallArgs = getAPICallArgs;
 
 },{"lodash":24}],9:[function(require,module,exports){
-var bind = require('lodash').bind;
-var cloneDeep = require('lodash').cloneDeep;
-var contains = require('lodash').contains;
+var lodash;
+if (require('lodash').bind) {
+	lodash = require('lodash');
+} else {
+	lodash = _;
+}
+var bind = lodash.bind;
+var cloneDeep = lodash.cloneDeep;
+var contains = lodash.contains;
 var inherits = require('inherits');
-var isUndefined = require('lodash').isUndefined;
+var isUndefined = lodash.isUndefined;
 var debug = require("debug")("botsdk:KoreRTMClient");
 
 var RTM_API_EVENTS = require('../events/rtm').EVENTS;
 var RTM_CLIENT_INTERNAL_EVENT_TYPES = [
   'pong',
-  RTM_API_EVENTS.HELLO,
+  RTM_API_EVENTS.HELLO
 ];
 var UNRECOVERABLE_RTM_START_ERRS = [
   'not_authed',
   'invalid_auth',
-  'account_inactive',
+  'account_inactive'
 ];
 var CLIENT_EVENTS = require('../events/client').RTM;
 var BaseAPIClient = require('../client');
@@ -1017,6 +1140,9 @@ KoreRTMClient.prototype._onStart = function _onStart(err, data) {
   catch(e){
     console.log(e && e.stack);
   }
+  if(data && data.errors && (data.errors[0].code === 'TOKEN_EXPIRED' || data.errors[0].code === 401 || data.errors[0].msg === 'token expired')){
+      $('.reload-btn').click();
+  }
   if (err || !data.url) {
     debug("error or no url in response %s", err || "no url");
     this.emit(CLIENT_EVENTS.UNABLE_TO_RTM_START, err || data.error);
@@ -1084,12 +1210,12 @@ KoreRTMClient.prototype.reconnect = function reconnect() {
   console.log("in reconnect");
 
   if (!this._reconnecting) {
-    this.emit(CLIENT_EVENTS.ATTEMPTING_RECONNECT);
     this._reconnecting = true;
+    this.emit(CLIENT_EVENTS.ATTEMPTING_RECONNECT);
     this._safeDisconnect();
     this._connAttempts++;
     if (this._connAttempts > this.MAX_RECONNECTION_ATTEMPTS) {
-      throw new Error('unable to connect to kore RTM API, failed after max reconnection attempts');
+      throw new Error('unable to connect to kore.ai RTM API, failed after max reconnection attempts');
     }
     setTimeout(bind(this.start, this), this._connAttempts * this.RECONNECTION_BACKOFF);
   }
@@ -1192,7 +1318,7 @@ KoreRTMClient.prototype.send = function send(message, optCb) {
   var err;
   var _this = this;
 
-  if (this.connected) {
+  if (this.connected && !this._reconnecting) {
     wsMsg.id = wsMsg.clientMessageId || this.nextMessageId();
     jsonMessage = JSON.stringify(wsMsg);
 
@@ -1206,7 +1332,7 @@ KoreRTMClient.prototype.send = function send(message, optCb) {
       }
     });
   } else {
-    err = 'ws not connected, unable to send message';
+    err = 'ws not connected or reconnecting, unable to send message';
     debug(err);
     if (!isUndefined(optCb)) {
       optCb(new Error(err));
@@ -1221,9 +1347,14 @@ module.exports = KoreRTMClient;
 /**
  * Simple transport using the node request library.
  */
-
-var has = require('lodash').has;
-var partial = require('lodash').partial;
+var lodash;
+if (require('lodash').bind) {
+	lodash = require('lodash');
+} else {
+	lodash = _;
+}
+var has = lodash.has;
+var partial = lodash.partial;
 var request = require('browser-request');
 
 
@@ -1243,7 +1374,7 @@ var handleRequestTranportRes = function handleRequestTranportRes(cb, err, respon
 var getRequestTransportArgs = function getReqestTransportArgs(args) {
   var transportArgs = {
     url: args.url,
-    headers: args.headers,
+    headers: args.headers
   };
 
   if (has(args.data, 'file')) {
@@ -1303,7 +1434,7 @@ inherits(AnonymousLogin, BaseApi);
 AnonymousLogin.prototype.login = function login(opts, optCb) {
   opts = opts || {};
   var args = {
-    opts: opts,
+    opts: opts
   };
   return this.client.makeAPICall('/oAuth/token/jwtgrant/anonymous', args, optCb);
 };
@@ -1398,7 +1529,7 @@ module.exports = {
   RtmApi: require('./rtm.js'),
   LogInApi: require('./login.js'),
   AnonymousLogin : require('./anonymouslogin.js'),
-  HistoryApi : require('./history.js'),
+  HistoryApi : require('./history.js')
 };
 
 
@@ -1416,7 +1547,7 @@ inherits(LogInApi, BaseApi);
 LogInApi.prototype.login = function login(opts, optCb) {
   opts = opts || {};
   var args = {
-    opts: opts,
+    opts: opts
   };
   return this.client.makeAPICall('/oAuth/token/jwtgrant', args, optCb);
 };
@@ -1436,7 +1567,7 @@ inherits(RtmApi, BaseApi);
 
 RtmApi.prototype.start = function start(opts, optCb) {
   var args = {
-    opts: opts,
+    opts: opts
   };
 
   return this.client.makeAPICall('/rtm/start', args, optCb);
@@ -1446,8 +1577,14 @@ RtmApi.prototype.start = function start(opts, optCb) {
 module.exports = RtmApi;
 
 },{"./BaseApi":12,"inherits":23}],18:[function(require,module,exports){
-var bind = require('lodash').bind;
-var forEach = require('lodash').forEach;
+var lodash;
+if (require('lodash').bind) {
+	lodash = require('lodash');
+} else {
+	lodash = _;
+}
+var bind = lodash.bind;
+var forEach = lodash.forEach;
 var inherits = require('inherits');
 
 var BaseAPIClient = require('../client');
@@ -1460,7 +1597,7 @@ function WebAPIClient(token, opts) {
   this.claims = opts.claims;
   this.retryConfig = clientOpts.retryConfig || {
     retries: 5,
-    factor: 3.9,
+    factor: 3.9
   };
   this.user = {};
 }
@@ -2772,6 +2909,7 @@ module.exports = WebAPIClient;
     if (typeof define === 'function' && define.amd) {
         // AMD. Register as an anonymous module.
         define([], factory);
+        module.exports = factory();
     } else if (typeof exports === 'object') {
         // Node. Does not work with strict CommonJS, but
         // only CommonJS-like enviroments that support module.exports,
@@ -2790,7 +2928,7 @@ request.log = {
   'trace': noop, 'debug': noop, 'info': noop, 'warn': noop, 'error': noop
 }
 
-var DEFAULT_TIMEOUT = 3 * 60 * 1000 // 3 minutes
+var DEFAULT_TIMEOUT = 2 * 60 * 1000 // 3 minutes
 
 //
 // request
@@ -2967,7 +3105,10 @@ function run_xhr(options) {
   var did = {'response':false, 'loading':false, 'end':false}
 
   xhr.onreadystatechange = on_state_change
-  xhr.open(options.method, options.uri, true) // asynchronous
+  xhr.open(options.method, options.uri, true); // asynchronous
+  for (var key in options.headers){
+    xhr.setRequestHeader(key, options.headers[key]);
+  }
   if(is_cors)
     xhr.withCredentials = !! options.withCredentials
   xhr.send(options.body)
@@ -2981,8 +3122,7 @@ function run_xhr(options) {
 
     if(xhr.readyState === XHR.OPENED) {
       request.log.debug('Request started', {'id':xhr.id})
-      for (var key in options.headers)
-        xhr.setRequestHeader(key, options.headers[key])
+      
     }
 
     else if(xhr.readyState === XHR.HEADERS_RECEIVED)
